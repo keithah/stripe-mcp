@@ -1,5 +1,4 @@
 node_modules/
 dist/
-.smithery/
 .env
 .DS_Store

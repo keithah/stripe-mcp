@@ -2,19 +2,26 @@
   "name": "stripe-mcp",
   "version": "1.0.0",
   "description": "Stripe Model Context Protocol server for fraud operations and full API coverage",
-  "main": "dist/index.js",
+  "type": "module",
   "module": "./src/index.ts",
+  "bin": {
+    "stripe-mcp": "./.smithery/stdio/index.cjs"
+  },
+  "files": [
+    ".smithery"
+  ],
   "scripts": {
-    "build": "npm run build:stdio && npm run build:shttp",
-    "build:stdio": "smithery build src/index.ts --transport stdio -o .smithery/stdio/index.cjs",
+    "build": "npm run build:all",
+    "build:stdio": "smithery build src/index.ts --transport stdio -o .smithery/stdio/index.cjs && echo '#!/usr/bin/env node' | cat - .smithery/stdio/index.cjs > temp && mv temp .smithery/stdio/index.cjs && chmod +x .smithery/stdio/index.cjs",
     "build:shttp": "smithery build src/index.ts --transport shttp -o .smithery/shttp/index.cjs",
+    "build:all": "npm run build:stdio && npm run build:shttp",
+    "prepare": "npm run build:all",
     "dev": "smithery dev",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.20.1",
     "@smithery/sdk": "^1.6.4",
