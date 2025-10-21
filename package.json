@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Stripe Model Context Protocol server for fraud operations and full API coverage",
   "main": "dist/index.js",
+  "module": "./src/index.ts",
   "scripts": {
     "build": "npm run build:stdio && npm run build:shttp",
     "build:stdio": "smithery build src/index.ts --transport stdio -o .smithery/stdio/index.cjs",
