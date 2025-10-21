@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { Logger } from './logger.js';
+import type { LogLevel } from './logger.js';
 
 export const configSchema = z.object({
   stripe_api_key: z.string().min(1).describe('Stripe secret API key (sk_live_... or sk_test_...).'),
@@ -63,6 +64,11 @@ export default function createServer({
     server,
     stripe,
     logger,
+    metadata: {
+      stripeApiVersion: stripeApiVersion ?? null,
+      defaultStripeAccount: config.default_stripe_account ?? null,
+      logLevel: config.log_level,
+    },
     ...(config.default_stripe_account
       ? { defaultStripeAccount: config.default_stripe_account }
       : {}),
@@ -159,22 +165,106 @@ const rawRequestShape = {
 const rawRequestSchema = z.object(rawRequestShape);
 type RawRequestInput = z.infer<typeof rawRequestSchema>;
 
+const statusShape = {
+  stripe_account: z
+    .string()
+    .optional()
+    .describe('Optional connected account ID override for the status probe.'),
+};
+const statusSchema = z.object(statusShape);
+type StatusInput = z.infer<typeof statusSchema>;
+
 function registerStripeTools({
   server,
   stripe,
   defaultStripeAccount,
   logger,
+  metadata,
 }: {
   server: McpServer;
   stripe: Stripe;
   defaultStripeAccount?: string;
   logger: Logger;
+  metadata: {
+    stripeApiVersion: string | null;
+    defaultStripeAccount: string | null;
+    logLevel: LogLevel;
+  };
 }) {
   const toolsLogger = logger.child('tools');
   toolsLogger.info('Registering Stripe tools');
+  const statusLogger = toolsLogger.child('stripe_status');
   const fraudLogger = toolsLogger.child('stripe_fraud_insight');
   const refundLogger = toolsLogger.child('stripe_create_refund');
   const rawRequestLogger = toolsLogger.child('stripe_raw_request');
+  server.registerTool(
+    'stripe_status',
+    {
+      title: 'Stripe MCP Status',
+      description:
+        'Returns server health information and validates Stripe API connectivity.',
+      inputSchema: statusShape,
+    },
+    async (input: StatusInput) => {
+      const stripeAccountOverride = input.stripe_account ?? null;
+      const requestAccount = stripeAccountOverride ?? defaultStripeAccount ?? null;
+      statusLogger.info('Invocation received', {
+        stripe_account_override: stripeAccountOverride,
+        effective_stripe_account: requestAccount,
+      });
+
+      try {
+        const options = requestAccount ? { stripeAccount: requestAccount } : undefined;
+        const account = await stripe.accounts.retrieve(undefined, options);
+        statusLogger.info('Status probe succeeded', {
+          account_id: account.id,
+          charges_enabled: account.charges_enabled,
+          payouts_enabled: account.payouts_enabled,
+        });
+
+        const summaryLines: string[] = [
+          `Server time: ${new Date().toISOString()}`,
+          `Stripe API version: ${metadata.stripeApiVersion ?? 'account_default'}`,
+          `Log level: ${metadata.logLevel}`,
+          `Account checked: ${account.id}`,
+          `Charges enabled: ${account.charges_enabled ? 'yes' : 'no'}`,
+          `Payouts enabled: ${account.payouts_enabled ? 'yes' : 'no'}`,
+        ];
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: summaryLines.join('\n'),
+            },
+          ],
+          structuredContent: {
+            status: 'ok',
+            server_time: new Date().toISOString(),
+            stripe_api_version: metadata.stripeApiVersion,
+            log_level: metadata.logLevel,
+            default_stripe_account: metadata.defaultStripeAccount,
+            stripe_account_used: requestAccount,
+            account: {
+              id: account.id,
+              type: account.type,
+              charges_enabled: account.charges_enabled,
+              payouts_enabled: account.payouts_enabled,
+              details_submitted: account.details_submitted,
+              email: account.email ?? null,
+            },
+          },
+        };
+      } catch (error) {
+        statusLogger.error('Status probe failed', {
+          stripe_account: stripeAccountOverride,
+          error_message: error instanceof Error ? error.message : String(error),
+          error_stack: error instanceof Error ? error.stack : undefined,
+        });
+        throw error;
+      }
+    }
+  );
   server.registerTool(
     'stripe_fraud_insight',
     {

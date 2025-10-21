@@ -43,6 +43,10 @@ When you push to Smithery, it runs the same build pipeline and hosts the generat
 
 ## Tool Reference
 
+### `stripe_status`
+- **Input**: Optional `stripe_account` override.
+- **Output**: Current server time, effective configuration (API version, log level, default account), and key flags from the Stripe account (charges/payouts enabled). Useful for quick health checks in Smithery.
+
 ### `stripe_fraud_insight`
 - **Input**: `payment_intent_id` or `charge_id` (one required), `include_events` (boolean, default `true`).
 - **Output**: Structured fraud/risk summary with Stripe Radar data and an automated recommendation.
