@@ -1,0 +1,24 @@
+{
+  "$schema": "https://smithery.ai/schema/smithery.json",
+  "name": "stripe-mcp",
+  "description": "Access Stripe API for payments, subscriptions, customers, and fraud operations",
+  "version": "1.0.0",
+  "config": {
+    "stripe_api_key": {
+      "type": "string",
+      "description": "Your Stripe secret API key (sk_live_... or sk_test_...)",
+      "required": true,
+      "secret": true
+    },
+    "stripe_api_version": {
+      "type": "string",
+      "description": "Optional Stripe API version override (e.g., 2024-06-20). Leave empty to use your account default.",
+      "required": false
+    },
+    "default_stripe_account": {
+      "type": "string",
+      "description": "Optional default connected account ID",
+      "required": false
+    }
+  }
+}
