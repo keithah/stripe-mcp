@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { Logger } from './logger.js';
 
 export const configSchema = z.object({
   stripe_api_key: z.string().min(1).describe('Stripe secret API key (sk_live_... or sk_test_...).'),
@@ -16,6 +17,10 @@ export const configSchema = z.object({
     .describe(
       'Optional default connected account ID. Used when stripe_raw_request omits stripe_account.'
     ),
+  log_level: z
+    .enum(['debug', 'info', 'warn', 'error'])
+    .default('info')
+    .describe('Minimum log level emitted by the server (default: info).'),
 });
 
 type ServerConfig = z.infer<typeof configSchema>;
@@ -42,6 +47,12 @@ export default function createServer({
   }
 
   const stripe = new Stripe(config.stripe_api_key, stripeConfig);
+  const logger = new Logger(config.log_level, 'stripe-mcp');
+  logger.info('Initializing Stripe MCP server', {
+    api_version: stripeApiVersion ?? 'account_default',
+    default_stripe_account: config.default_stripe_account ?? null,
+    log_level: config.log_level,
+  });
 
   const server = new McpServer({
     name: 'stripe-fraud-mcp',
@@ -51,6 +62,7 @@ export default function createServer({
   registerStripeTools({
     server,
     stripe,
+    logger,
     ...(config.default_stripe_account
       ? { defaultStripeAccount: config.default_stripe_account }
       : {}),
@@ -151,11 +163,18 @@ function registerStripeTools({
   server,
   stripe,
   defaultStripeAccount,
+  logger,
 }: {
   server: McpServer;
   stripe: Stripe;
   defaultStripeAccount?: string;
+  logger: Logger;
 }) {
+  const toolsLogger = logger.child('tools');
+  toolsLogger.info('Registering Stripe tools');
+  const fraudLogger = toolsLogger.child('stripe_fraud_insight');
+  const refundLogger = toolsLogger.child('stripe_create_refund');
+  const rawRequestLogger = toolsLogger.child('stripe_raw_request');
   server.registerTool(
     'stripe_fraud_insight',
     {
@@ -165,37 +184,59 @@ function registerStripeTools({
       inputSchema: fraudInsightShape,
     },
     async (input: FraudInsightInput) => {
-      if (!input.payment_intent_id && !input.charge_id) {
-        throw new Error(
-          'You must provide either payment_intent_id or charge_id to retrieve fraud insights.'
-        );
+      fraudLogger.info('Invocation received', {
+        has_payment_intent: Boolean(input.payment_intent_id),
+        has_charge: Boolean(input.charge_id),
+        include_events: input.include_events,
+      });
+      try {
+        if (!input.payment_intent_id && !input.charge_id) {
+          fraudLogger.warn('Missing identifiers for fraud insight request');
+          throw new Error(
+            'You must provide either payment_intent_id or charge_id to retrieve fraud insights.'
+          );
+        }
+
+        const insight = await buildFraudInsight(stripe, input, fraudLogger);
+
+        const summaryLines: string[] = [
+          `Payment Intent: ${insight.paymentIntent?.id ?? 'n/a'} | status: ${
+            insight.paymentIntent?.status ?? 'unknown'
+          }`,
+          `Charge: ${insight.charge?.id ?? 'n/a'} | risk level: ${
+            insight.charge?.outcome?.risk_level ?? 'unknown'
+          } | risk score: ${insight.charge?.outcome?.risk_score ?? 'unknown'}`,
+          `Recommendation: ${insight.recommendation.action.toUpperCase()} - ${
+            insight.recommendation.reason
+          }`,
+        ];
+
+        fraudLogger.info('Fraud insight generated', {
+          payment_intent: insight.paymentIntent?.id ?? null,
+          charge: insight.charge?.id ?? null,
+          recommendation: insight.recommendation.action,
+          risk_level: insight.charge?.outcome?.risk_level ?? null,
+          risk_score: insight.charge?.outcome?.risk_score ?? null,
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `${summaryLines.join(
+                '\n'
+              )}\n\nFull details:\n${JSON.stringify(insight, null, 2)}`,
+            },
+          ],
+          structuredContent: insight as Record<string, unknown>,
+        };
+      } catch (error) {
+        fraudLogger.error('Fraud insight tool failed', {
+          error_message: error instanceof Error ? error.message : String(error),
+          error_stack: error instanceof Error ? error.stack : undefined,
+        });
+        throw error;
       }
-
-      const insight = await buildFraudInsight(stripe, input);
-
-      const summaryLines: string[] = [
-        `Payment Intent: ${insight.paymentIntent?.id ?? 'n/a'} | status: ${
-          insight.paymentIntent?.status ?? 'unknown'
-        }`,
-        `Charge: ${insight.charge?.id ?? 'n/a'} | risk level: ${
-          insight.charge?.outcome?.risk_level ?? 'unknown'
-        } | risk score: ${insight.charge?.outcome?.risk_score ?? 'unknown'}`,
-        `Recommendation: ${insight.recommendation.action.toUpperCase()} - ${
-          insight.recommendation.reason
-        }`,
-      ];
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `${summaryLines.join(
-              '\n'
-            )}\n\nFull details:\n${JSON.stringify(insight, null, 2)}`,
-          },
-        ],
-        structuredContent: insight as Record<string, unknown>,
-      };
     }
   );
 
@@ -208,48 +249,80 @@ function registerStripeTools({
       inputSchema: refundShape,
     },
     async (input: RefundInput) => {
-      if (!input.payment_intent_id && !input.charge_id) {
-        throw new Error(
-          'You must provide either payment_intent_id or charge_id to create a refund.'
-        );
-      }
+      refundLogger.info('Invocation received', {
+        has_payment_intent: Boolean(input.payment_intent_id),
+        has_charge: Boolean(input.charge_id),
+        amount: input.amount ?? null,
+        reason: input.reason ?? null,
+      });
+      try {
+        if (!input.payment_intent_id && !input.charge_id) {
+          refundLogger.warn('Missing identifiers for refund request');
+          throw new Error(
+            'You must provide either payment_intent_id or charge_id to create a refund.'
+          );
+        }
 
-      const params: Stripe.RefundCreateParams = {};
-      if (input.payment_intent_id) {
-        params.payment_intent = input.payment_intent_id;
-      }
-      if (input.charge_id) {
-        params.charge = input.charge_id;
-      }
-      if (typeof input.amount === 'number') {
-        params.amount = input.amount;
-      }
-      if (input.reason) {
-        params.reason = input.reason;
-      }
-      if (input.metadata) {
-        params.metadata = input.metadata;
-      }
+        const params: Stripe.RefundCreateParams = {};
+        if (input.payment_intent_id) {
+          params.payment_intent = input.payment_intent_id;
+        }
+        if (input.charge_id) {
+          params.charge = input.charge_id;
+        }
+        if (typeof input.amount === 'number') {
+          params.amount = input.amount;
+        }
+        if (input.reason) {
+          params.reason = input.reason;
+        }
+        if (input.metadata) {
+          params.metadata = input.metadata;
+        }
 
-      const refundResponse = await stripe.refunds.create(params);
-      const refund = refundResponse as Stripe.Refund;
+        refundLogger.debug('Creating refund with parameters', {
+          payment_intent: params.payment_intent ?? null,
+          charge: params.charge ?? null,
+          amount: params.amount ?? null,
+          reason: params.reason ?? null,
+          metadata_keys: params.metadata ? Object.keys(params.metadata) : [],
+        });
+        const refundResponse = await stripe.refunds.create(params);
+        const refund = refundResponse as Stripe.Refund;
+        refundLogger.info('Refund created', {
+          refund_id: refund.id,
+          target_charge: typeof refund.charge === 'string' ? refund.charge : refund.charge?.id ?? null,
+          target_payment_intent:
+            typeof refund.payment_intent === 'string'
+              ? refund.payment_intent
+              : refund.payment_intent?.id ?? null,
+          status: refund.status ?? null,
+          amount: refund.amount,
+        });
 
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `Refund ${refund.id} created for ${refund.amount} ${
-              refund.currency
-            } on ${
-              refund.charge ?? refund.payment_intent ?? 'unknown target'
-            }. Status: ${refund.status ?? 'unknown'}`,
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Refund ${refund.id} created for ${refund.amount} ${
+                refund.currency
+              } on ${
+                refund.charge ?? refund.payment_intent ?? 'unknown target'
+              }. Status: ${refund.status ?? 'unknown'}`,
+            },
+          ],
+          structuredContent: {
+            refund,
+            last_response: refundResponse.lastResponse,
           },
-        ],
-        structuredContent: {
-          refund,
-          last_response: refundResponse.lastResponse,
-        },
-      };
+        };
+      } catch (error) {
+        refundLogger.error('Refund tool failed', {
+          error_message: error instanceof Error ? error.message : String(error),
+          error_stack: error instanceof Error ? error.stack : undefined,
+        });
+        throw error;
+      }
     }
   );
 
@@ -263,6 +336,15 @@ function registerStripeTools({
     },
     async (input: RawRequestInput) => {
       const method = input.method.toUpperCase() as RawRequestInput['method'];
+      rawRequestLogger.info('Invocation received', {
+        method,
+        path: input.path,
+        has_query: Boolean(input.query),
+        has_payload: Boolean(input.payload),
+        idempotency_key: input.idempotency_key ?? null,
+        explicit_stripe_account: input.stripe_account ?? null,
+        api_version: input.api_version ?? null,
+      });
 
       let path = input.path;
       if (input.query && method !== 'POST') {
@@ -281,6 +363,11 @@ function registerStripeTools({
         input.stripe_account ?? defaultStripeAccount ?? undefined;
 
       try {
+        rawRequestLogger.debug('Dispatching raw request', {
+          method,
+          path,
+          stripe_account: stripeAccount ?? null,
+        });
         const response = await stripe.rawRequest(method, path, params, {
           ...(input.idempotency_key
             ? { idempotencyKey: input.idempotency_key }
@@ -291,6 +378,14 @@ function registerStripeTools({
 
         const { lastResponse, ...responseData } =
           response as Stripe.Response<Record<string, unknown>>;
+
+        rawRequestLogger.info('Raw request completed', {
+          method,
+          path,
+          status: lastResponse.statusCode,
+          request_id: lastResponse.requestId,
+          stripe_account: lastResponse.stripeAccount ?? null,
+        });
 
         return {
           content: [
@@ -313,6 +408,15 @@ function registerStripeTools({
         };
       } catch (error) {
         if (error instanceof Stripe.errors.StripeError) {
+          rawRequestLogger.warn('Stripe raw error captured', {
+            method,
+            path,
+            status: error.statusCode ?? null,
+            type: error.type,
+            code: error.code ?? null,
+            request_id: error.requestId ?? null,
+            message: error.message,
+          });
           return {
             content: [
               {
@@ -334,6 +438,12 @@ function registerStripeTools({
           };
         }
 
+        rawRequestLogger.error('Unexpected raw request failure', {
+          method,
+          path,
+          error_message: error instanceof Error ? error.message : String(error),
+          error_stack: error instanceof Error ? error.stack : undefined,
+        });
         throw error;
       }
     }
@@ -342,8 +452,14 @@ function registerStripeTools({
 
 async function buildFraudInsight(
   stripe: Stripe,
-  input: FraudInsightInput
+  input: FraudInsightInput,
+  logger: Logger
 ): Promise<FraudInsightResult> {
+  logger.debug('Building fraud insight', {
+    payment_intent_id: input.payment_intent_id ?? null,
+    charge_id: input.charge_id ?? null,
+    include_events: input.include_events,
+  });
   const result: FraudInsightResult = {
     recommendation: {
       action: 'monitor',
@@ -355,6 +471,9 @@ async function buildFraudInsight(
   let charge: Stripe.Charge | null = null;
 
   if (input.payment_intent_id) {
+    logger.debug('Retrieving PaymentIntent', {
+      payment_intent_id: input.payment_intent_id,
+    });
     paymentIntent = await stripe.paymentIntents.retrieve(
       input.payment_intent_id,
       {
@@ -368,6 +487,11 @@ async function buildFraudInsight(
       }
     );
     result.paymentIntent = summarizePaymentIntent(paymentIntent);
+    logger.debug('PaymentIntent retrieved', {
+      payment_intent_id: paymentIntent.id,
+      latest_charge_type: typeof paymentIntent.latest_charge,
+      status: paymentIntent.status,
+    });
 
     if (
       paymentIntent.latest_charge &&
@@ -375,6 +499,9 @@ async function buildFraudInsight(
     ) {
       charge = paymentIntent.latest_charge as Stripe.Charge;
     } else if (typeof paymentIntent.latest_charge === 'string') {
+      logger.debug('Fetching latest charge by ID', {
+        charge_id: paymentIntent.latest_charge,
+      });
       charge = await stripe.charges.retrieve(paymentIntent.latest_charge, {
         expand: [
           'outcome',
@@ -388,6 +515,7 @@ async function buildFraudInsight(
   }
 
   if (input.charge_id) {
+    logger.debug('Retrieving Charge', { charge_id: input.charge_id });
     charge = await stripe.charges.retrieve(input.charge_id, {
       expand: [
         'outcome',
@@ -398,12 +526,19 @@ async function buildFraudInsight(
       ],
     });
     result.charge = summarizeCharge(charge);
+    logger.debug('Charge retrieved', {
+      charge_id: charge.id,
+      outcome_present: Boolean(charge.outcome),
+    });
 
     if (
       charge.payment_intent &&
       typeof charge.payment_intent === 'string' &&
       !paymentIntent
     ) {
+      logger.debug('Fetching PaymentIntent referenced by charge', {
+        payment_intent_id: charge.payment_intent,
+      });
       paymentIntent = await stripe.paymentIntents.retrieve(
         charge.payment_intent,
         {
@@ -429,6 +564,13 @@ async function buildFraudInsight(
     charge = chargeList.data[0] ?? null;
     if (charge) {
       result.charge = summarizeCharge(charge);
+      logger.debug('Charge inferred from PaymentIntent charges list', {
+        charge_id: charge.id,
+      });
+    } else {
+      logger.warn('No charge found for payment intent', {
+        payment_intent_id: paymentIntent.id,
+      });
     }
   }
 
@@ -440,6 +582,9 @@ async function buildFraudInsight(
     const reviews: ReviewSummary[] = [];
     if (charge.review) {
       if (typeof charge.review === 'string') {
+        logger.debug('Retrieving associated review', {
+          review_id: charge.review,
+        });
         const reviewResponse = await stripe.reviews.retrieve(charge.review);
         reviews.push(summarizeReview(reviewResponse));
       } else {
@@ -468,6 +613,14 @@ async function buildFraudInsight(
           ).data
         : [];
 
+    logger.debug('Radar context collected', {
+      charge_id: charge.id,
+      early_fraud_warning_count: earlyFraudWarnings.data.length,
+      review_count: reviews.length,
+      dispute_count: disputeData.length,
+      refund_count: refundData.length,
+    });
+
     result.radar = {
       early_fraud_warnings: earlyFraudWarnings.data.map(
         summarizeEarlyFraudWarning
@@ -492,6 +645,10 @@ async function buildFraudInsight(
       reason:
         'No charge details available. Review manually before taking action.',
     };
+    logger.warn('No charge details available for fraud insight', {
+      payment_intent_id: paymentIntent?.id ?? null,
+      charge_id: input.charge_id ?? null,
+    });
   }
 
   return result;

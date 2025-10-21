@@ -22,6 +22,7 @@ The Smithery runtime picks up the configuration schema that lives in `src/index.
 | `stripe_api_key` | ✅ | Secret key used to authenticate Stripe requests. |
 | `stripe_api_version` | ❌ | Optional API version override (defaults to your account version). |
 | `default_stripe_account` | ❌ | Optional connected account ID used when a request does not specify one. |
+| `log_level` | ❌ | Minimum log level to emit (`debug`, `info`, `warn`, `error`). Defaults to `info`. |
 
 The repository includes `smithery.yaml`, so Smithery knows to treat it as a TypeScript project and to compile from `src/index.ts`.
 
@@ -59,6 +60,11 @@ When you push to Smithery, it runs the same build pipeline and hosts the generat
 - `npm run build` – Builds stdio and SHTTP bundles under `.smithery/`.
 - `npm run build:stdio` / `npm run build:shttp` – Build individual transports.
 - `npm run typecheck` – TypeScript diagnostics without emitting files.
+
+## Logging
+- The server emits structured JSON logs with timestamps, logger names, and context to make triage in Smithery or other observability tooling straightforward.
+- Set `log_level` in the Smithery configuration to control verbosity; `debug` includes every Stripe call and fraud-analysis step, while `info` surfaces tool invocations and outcomes.
+- Sensitive values (Stripe API keys, tokens, etc.) are automatically redacted from logged context.
 
 ## Next Steps
 - Add additional purpose-built tools for dispute responses, Radar rule management, value list operations, etc., by wrapping the official SDK in new MCP handlers.
