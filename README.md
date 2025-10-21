@@ -1,6 +1,15 @@
 # Stripe Fraud MCP
+[![smithery badge](https://smithery.ai/badge/@keithah/stripe-mcp)](https://smithery.ai/server/@keithah/stripe-mcp)
 
 TypeScript Model Context Protocol (MCP) server that wraps the official [`stripe`](https://github.com/stripe/stripe-node) SDK. The server focuses on fraud and Radar operations while still exposing a raw request tool that lets an LLM call any Stripe REST endpoint. It is designed to run locally or inside [Smithery](https://smithery.ai/) for hosting.
+
+### Installing via Smithery
+
+To install Stripe Fraud Control automatically via [Smithery](https://smithery.ai/server/@keithah/stripe-mcp):
+
+```bash
+npx -y @smithery/cli install @keithah/stripe-mcp
+```
 
 ## Features
 - **`stripe_fraud_insight`** – Given a `payment_intent_id` or `charge_id`, pulls Radar early fraud warnings, risk scores, disputes, refunds, and reviews, then returns a recommendation (`refund`, `manual_review`, or `monitor`).
